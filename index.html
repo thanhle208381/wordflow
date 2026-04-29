@@ -625,10 +625,25 @@ function getDeck(id){return decks[id];}
 function allWords(){let a=[];getDecks().forEach(d=>a.push(...(d.words||[])));return a;}
 function findWord(id){for(const d of getDecks()){const w=(d.words||[]).find(x=>x.id===id);if(w)return w;}return sWords.find(w=>w.id===id)||{english:'?',vietnamese:'?',id};}
 function setLoadMsg(m){document.getElementById('load-msg').textContent=m;}
-function imgUrl(word){
-  // Use loremflickr with deterministic seed — reliable and free
-  let h=5381;for(const c of word)h=((h<<5)+h)+c.charCodeAt(0)|0;
-  return`https://loremflickr.com/300/300/${encodeURIComponent(word)}?lock=${Math.abs(h)%9999}`;
+// Fetch accurate image from Wikimedia/Wikipedia
+async function fetchWikiImg(word){
+  try{
+    const r=await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(word)}`,{headers:{'Accept':'application/json'}});
+    if(r.ok){const d=await r.json();const url=d.thumbnail?.source||d.originalimage?.source||null;if(url)return url;}
+  }catch{}
+  try{
+    const r=await fetch(`https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(word)}&gsrnamespace=6&gsrlimit=5&prop=imageinfo&iiprop=url|mime&iiurlwidth=400&format=json&origin=*`);
+    if(r.ok){const d=await r.json();const pages=Object.values(d?.query?.pages||{});for(const p of pages){const info=p.imageinfo?.[0];if(info&&info.mime?.startsWith('image/')&&!info.url?.endsWith('.svg'))return info.thumburl||info.url;}}
+  }catch{}
+  return null;
+}
+async function fetchWikiImgs(word){
+  const res=[];
+  try{const r=await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(word)}`,{headers:{'Accept':'application/json'}});if(r.ok){const d=await r.json();if(d.thumbnail?.source)res.push(d.thumbnail.source);if(d.originalimage?.source&&d.originalimage.source!==d.thumbnail?.source)res.push(d.originalimage.source);}}catch{}
+  try{const r=await fetch(`https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(word)}&gsrnamespace=6&gsrlimit=12&prop=imageinfo&iiprop=url|mime&iiurlwidth=400&format=json&origin=*`);
+    if(r.ok){const d=await r.json();const pages=Object.values(d?.query?.pages||{});for(const p of pages){const info=p.imageinfo?.[0];if(info&&info.mime?.startsWith('image/')&&!info.url?.endsWith('.svg')){const u=info.thumburl||info.url;if(!res.includes(u))res.push(u);}}}
+  }catch{}
+  return res.slice(0,9);
 }
 
 // ══════════════════════════════════════════════════
@@ -644,12 +659,32 @@ async function loadData(uid_){
     }else{
       const id=uid();
       decks={[id]:{id,name:'Từ Vựng Cơ Bản',emoji:'📖',createdAt:Date.now(),
-        words:DEF_WORDS.map(w=>mkW(w.e,w.v,imgUrl(w.e),null))}};
+        words:DEF_WORDS.map(w=>mkW(w.e,w.v,null,null))}};
       await saveDecks();
     }
     if(ss.exists()){stats={...stats,...ss.data()};if(!stats.dailyLog)stats.dailyLog={};}
   }catch(e){console.error(e);toast('⚠️ Lỗi kết nối — dùng bản cục bộ');}
 }
+// Lazy-load missing images in background after app starts
+async function lazyLoadImages(){
+  const allW=allWords().filter(w=>!w.imageUrl);
+  if(!allW.length)return;
+  // Process in small batches to avoid rate limiting
+  for(let i=0;i<Math.min(allW.length,30);i++){
+    const w=allW[i];
+    const url=await fetchWikiImg(w.english);
+    if(url){
+      // Find and update the word in decks
+      for(const d of getDecks()){
+        const wObj=d.words?.find(x=>x.id===w.id);
+        if(wObj){wObj.imageUrl=url;break;}
+      }
+    }
+    await sleep(150); // gentle rate limiting
+  }
+  await saveDecks();
+}
+
 async function saveDecks(){
   if(!CU)return;
   try{await setDoc(doc(fdb,'users',CU.uid,'data','decks'),{decks});}catch(e){console.error(e);}
@@ -687,6 +722,8 @@ onAuthStateChanged(auth, async user=>{
     document.getElementById('s-loading').classList.add('off');
     document.getElementById('s-app').classList.remove('off');
     goTab('home');
+    // Start fetching missing images in background
+    setTimeout(()=>lazyLoadImages(), 2000);
   }else{
     CU=null;
     document.getElementById('s-loading').classList.add('off');
@@ -925,15 +962,15 @@ function showEditWord(did,wid){
 async function searchImgs(){
   const q=(document.getElementById('we-en').value||document.getElementById('we-vn').value||'').trim();
   if(!q){toast('Nhập từ trước');return;}
-  // Use loremflickr with different lock values for variety
-  const imgs=[];
-  for(let i=0;i<9;i++){
-    let h=5381+i*7;for(const c of q)h=((h<<5)+h)+c.charCodeAt(0)|0;
-    imgs.push(`https://loremflickr.com/300/300/${encodeURIComponent(q)}?lock=${Math.abs(h)%9999}`);
-  }
+  const btn=document.querySelector('#m-word .btn-cyan');
+  if(btn){btn.disabled=true;btn.textContent='⏳';}
   const grid=document.getElementById('we-grid');
   grid.classList.remove('hidden');
-  grid.innerHTML=imgs.map(u=>`<img src="${u}" onclick="pickImg('${eq(u)}')" loading="lazy" onerror="this.style.display='none'">`).join('');
+  grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:20px;color:var(--text3)">🔍 Đang tìm ảnh...</div>';
+  const imgs=await fetchWikiImgs(q);
+  if(btn){btn.disabled=false;btn.textContent='🔍 Tìm';}
+  if(!imgs.length){grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:20px;color:var(--text3)">Không tìm thấy ảnh</div>';return;}
+  grid.innerHTML=imgs.map(u=>`<img src="${u}" onclick="pickImg(this.src)" loading="lazy" onerror="this.style.display='none'">`).join('');
 }
 function pickImg(url){
   document.getElementById('we-img').value=url;
@@ -982,7 +1019,7 @@ async function doBulk(){
       if(r.ok){const d=await r.json();ph=d[0]?.phonetic||d[0]?.phonetics?.find(p=>p.text)?.text||null;au=d[0]?.phonetics?.find(p=>p.audio)?.audio||null;}
     }catch{}
     if(!vn){vn=await translateVN(en);await sleep(200);}
-    const w=mkW(en,vn,imgUrl(en),au);w.phonetic=ph;
+    const imgU=await fetchWikiImg(en);const w=mkW(en,vn,imgU,au);w.phonetic=ph;
     if(!deck.words)deck.words=[];
     deck.words.unshift(w);added++;
   }
@@ -1222,7 +1259,7 @@ function exportData(){
 }
 async function resetData(){
   if(!confirm('Xóa toàn bộ dữ liệu học tập?'))return;
-  const id=uid();decks={[id]:{id,name:'Từ Vựng Cơ Bản',emoji:'📖',createdAt:Date.now(),words:DEF_WORDS.map(w=>mkW(w.e,w.v,imgUrl(w.e),null))}};
+  const id=uid();decks={[id]:{id,name:'Từ Vựng Cơ Bản',emoji:'📖',createdAt:Date.now(),words:DEF_WORDS.map(w=>mkW(w.e,w.v,null,null))}};
   stats={totalSessions:0,totalPoints:0,dailyLog:{}};await saveDecks();await saveStats();renderStats();refreshHome();renderDecks();toast('✅ Đã reset');
 }
 window.exportData=exportData; window.resetData=resetData;
