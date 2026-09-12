@@ -1363,24 +1363,66 @@ window.showChangePw=showChangePw; window.savePw=savePw; window.showInstall=showI
 function openM(id){document.getElementById(id).classList.remove('hidden');}
 function closeM(id){document.getElementById(id).classList.add('hidden');}
 function toast(msg){const w=document.getElementById('toast');const el=document.createElement('div');el.className='tpill';el.textContent=msg;w.appendChild(el);setTimeout(()=>el.remove(),2800);}
-let _bestVoice=null;
-function getBestVoice(){
-  if(_bestVoice)return _bestVoice;
-  const voices=window.speechSynthesis.getVoices();
-  // Priority: Google US English > Microsoft > Apple Samantha > any en-US
-  const priority=['Google US English','Microsoft Aria Online','Microsoft Guy Online','Samantha','Alex','Karen'];
-  for(const name of priority){const v=voices.find(x=>x.name===name);if(v){_bestVoice=v;return v;}}
-  // Fallback: first en-US voice
-  const v=voices.find(x=>x.lang==='en-US')||voices.find(x=>x.lang.startsWith('en'));
-  _bestVoice=v||null;return _bestVoice;
+// ── TTS: 3-tier natural voice system ──────────────────
+// Tier 1: Merriam-Webster mp3 (real human, stored in word.audioUrl)
+// Tier 2: StreamElements neural TTS (Amazon Polly — natural AI voice, free)
+// Tier 3: Web Speech API (device fallback)
+
+let _ttsAudio = null; // current playing Audio object
+
+function spk(word, silent=false){
+  // Stop any currently playing audio
+  if(_ttsAudio){ _ttsAudio.pause(); _ttsAudio=null; }
+  window.speechSynthesis?.cancel();
+
+  // Find the word object to check for stored audioUrl
+  const wObj = allWords().find(w=>w.english===word);
+
+  // Tier 1: Use stored Merriam-Webster recording if available
+  if(wObj?.audioUrl){
+    _ttsAudio = new Audio(wObj.audioUrl);
+    _ttsAudio.playbackRate = 0.92;
+    _ttsAudio.play().catch(()=> spkStream(word));
+    return;
+  }
+  // Tier 2: StreamElements neural voice (sounds like Amazon Polly)
+  spkStream(word);
 }
-window.speechSynthesis.onvoiceschanged=()=>{_bestVoice=null;}; // reset cache on voice list change
-function spk(word,silent=false){
-  const s=window.speechSynthesis;if(!s)return;
+
+// StreamElements TTS — Matthew (US male, very natural)
+// Fallback voices: Joanna (US female), Joey (US male)
+const SE_VOICES = ['Matthew','Joanna','Joey'];
+let _seVoiceIdx = 0;
+
+function spkStream(word){
+  const voice = SE_VOICES[_seVoiceIdx];
+  const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(word)}`;
+  _ttsAudio = new Audio(url);
+  _ttsAudio.playbackRate = 0.92;
+  _ttsAudio.play().catch(()=>{
+    // If current voice fails, try next voice
+    _seVoiceIdx = (_seVoiceIdx + 1) % SE_VOICES.length;
+    if(_seVoiceIdx !== 0){
+      spkStream(word); // retry with next voice
+    } else {
+      spkFallback(word); // all StreamElements failed → use Web Speech API
+    }
+  });
+}
+
+// Web Speech API fallback (device TTS)
+function spkFallback(word){
+  const s = window.speechSynthesis; if(!s) return;
   s.cancel();
-  const u=new SpeechSynthesisUtterance(word);
-  u.lang='en-US';u.rate=0.82;u.pitch=1.0;
-  const v=getBestVoice();if(v)u.voice=v;
+  const u = new SpeechSynthesisUtterance(word);
+  u.lang='en-US'; u.rate=0.85; u.pitch=1.0;
+  // Pick best available voice
+  const voices = s.getVoices();
+  const priority = ['Google US English','Microsoft Aria Online','Microsoft Guy Online','Samantha','Alex'];
+  for(const name of priority){
+    const v = voices.find(x=>x.name===name);
+    if(v){ u.voice=v; break; }
+  }
   s.speak(u);
 }
 function sim(a,b){a=a.toLowerCase().trim();b=b.toLowerCase().trim();if(a===b)return 1;if(!a||!b)return 0;const dp=Array.from({length:a.length+1},(_,i)=>Array.from({length:b.length+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return 1-dp[a.length][b.length]/Math.max(a.length,b.length);}
