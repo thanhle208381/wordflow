@@ -317,6 +317,12 @@ canvas{display:block;width:100%;}
     <div class="nav"><div class="nav-logo">WF</div><div style="flex:1"></div><div style="font-size:.73rem;color:var(--text3)" id="hdate"></div></div>
     <div class="scroll">
       <div class="h-hero"><div class="h-greet" id="hgreet">Chào 👋</div><div class="h-title">Học <span class="hl">thông minh</span>,<br>nhớ <span class="hl">lâu hơn.</span></div></div>
+      <!-- Streak banner -->
+      <div id="streak-banner" style="display:none;margin:0 0 14px;background:linear-gradient(135deg,rgba(251,146,60,.15),rgba(248,113,113,.1));border:1px solid rgba(251,146,60,.3);border-radius:16px;padding:13px 18px;display:flex;align-items:center;gap:12px">
+        <div style="font-size:2rem;line-height:1">🔥</div>
+        <div><div style="font-family:var(--mono);font-size:1.5rem;font-weight:700;color:var(--amber)" id="streak-num">0</div><div style="font-size:.72rem;color:var(--text2);margin-top:1px">ngày học liên tiếp</div></div>
+        <div style="margin-left:auto;font-size:.75rem;color:var(--text3);text-align:right" id="streak-msg"></div>
+      </div>
       <div class="sg">
         <div class="sb"><div class="sn" style="color:var(--lime)" id="h-tot">0</div><div class="sl">Từ</div></div>
         <div class="sb"><div class="sn" style="color:var(--amber)" id="h-due">0</div><div class="sl">Đến hạn</div></div>
@@ -846,6 +852,21 @@ window.goTab=goTab; window.goSubBack=goSubBack;
 // ══════════════════════════════════════════════════
 // HOME
 // ══════════════════════════════════════════════════
+function calcStreak(){
+  // Count consecutive days with at least 1 word learned ending today or yesterday
+  const today=new Date().toISOString().slice(0,10);
+  let streak=0;
+  const d=new Date();
+  // Check if studied today — if not, streak can still count if yesterday was studied
+  for(let i=0;i<365;i++){
+    const key=d.toISOString().slice(0,10);
+    if((stats.dailyLog?.[key]||0)>0){streak++;}
+    else if(i===0){/* today not studied yet, check yesterday */d.setDate(d.getDate()-1);continue;}
+    else break;
+    d.setDate(d.getDate()-1);
+  }
+  return streak;
+}
 function refreshHome(){
   const now=Date.now(); const ds=getDecks();
   let tot=0,due=0,mas=0;
@@ -857,6 +878,14 @@ function refreshHome(){
   const h=new Date().getHours(),n=CU?.displayName||'bạn';
   document.getElementById('hgreet').textContent=(h<12?'Chào buổi sáng ☀️':h<18?'Chào buổi chiều 🌤️':'Chào buổi tối 🌙')+', '+n+'!';
   document.getElementById('hdate').textContent=new Date().toLocaleDateString('vi-VN',{weekday:'short',day:'numeric',month:'short'});
+  // Streak
+  const streak=calcStreak();
+  const banner=document.getElementById('streak-banner');
+  if(streak>=2){
+    banner.style.display='flex';
+    document.getElementById('streak-num').textContent=streak;
+    document.getElementById('streak-msg').textContent=streak>=30?'🏆 Tuyệt vời!':streak>=14?'🌟 Xuất sắc!':streak>=7?'💪 Cố lên!':'Tiếp tục nhé!';
+  }else{banner.style.display='none';}
   const el=document.getElementById('hdlist');
   if(!ds.length){el.innerHTML='<div class="empty"><div class="empty-ico">📭</div><p>Chưa có bộ từ nào</p></div>';return;}
   el.innerHTML=ds.map(d=>{
@@ -1041,7 +1070,9 @@ function getDue(did){
 function startSession(did){
   sDeckId=did;const due=getDue(did);
   if(!due.length){toast('Không có từ nào cần ôn tập! 🎉');return;}
-  sWords=due.slice(0,5);sScore=0;sLvUp=new Set();sWrong=[];
+  // FIX: if 6-7 due words, batch into one session instead of 5+1-2
+  const batchSize = due.length<=7 ? due.length : 5;
+  sWords=due.slice(0,batchSize);sScore=0;sLvUp=new Set();sWrong=[];
   sResults=sWords.map(w=>({word:w,score:0}));
   const skip=skipSpkUntil>Date.now();
   sQuizzes=buildQ(sWords,skip);qIdx=0;
@@ -1051,13 +1082,29 @@ function startSession(did){
 }
 function buildQ(words,noSpk){
   const qs=[];
+  // FIX: First question of every word = 'viet' (look at VN meaning, type EN)
+  // Round 0: all words get 'viet' or 'viet_new' — interleaved in shuffled order
+  const round0Order=shuf([...Array(words.length).keys()]);
+  round0Order.forEach(wi=>{
+    const w=words[wi];
+    qs.push({wid:w.id,type:w.studiedBefore?'viet':'viet_new',retry:false});
+  });
+  // Remaining rounds: other quiz types shuffled per word
   const ts=words.map(w=>{
-    if(!w.studiedBefore){const r=shuf(noSpk?['choice','listen','viet']:['choice','listen','speak']);return['viet_new',...r];}
-    return shuf(noSpk?['choice','listen','viet']:['choice','listen','viet','speak']);
+    if(!w.studiedBefore){return shuf(noSpk?['choice','listen']:['choice','listen','speak']);}
+    return shuf(noSpk?['choice','listen']:['choice','listen','speak']);
   });
   const maxR=Math.max(...ts.map(t=>t.length));
-  for(let r=0;r<maxR;r++){const ord=shuf([...Array(words.length).keys()]);ord.forEach(wi=>{if(ts[wi][r])qs.push({wid:words[wi].id,type:ts[wi][r],retry:false});});}
-  if(noSpk){const alt=['choice','listen','viet'];while(qs.length<20){const wi=qs.length%words.length;qs.push({wid:words[wi].id,type:alt[qs.length%3],retry:false});}}
+  for(let r=0;r<maxR;r++){
+    const ord=shuf([...Array(words.length).keys()]);
+    ord.forEach(wi=>{if(ts[wi][r])qs.push({wid:words[wi].id,type:ts[wi][r],retry:false});});
+  }
+  if(noSpk){
+    // Replace speak types & pad to 20
+    for(let i=0;i<qs.length;i++){if(qs[i].type==='speak')qs[i].type=['choice','listen','viet'][i%3];}
+    const alt=['choice','listen','viet'];
+    while(qs.length<20){const wi=qs.length%words.length;qs.push({wid:words[wi].id,type:alt[qs.length%3],retry:false});}
+  }
   return qs;
 }
 function upProg(){
@@ -1089,7 +1136,22 @@ function bChoice(w,a){
     <div class="qact"><button class="btn btn-amber btn-sm" id="hbtn" onclick="doHint('${eq(w.english)}','${eq(h)}')">💡 Gợi ý</button></div>`;
   spk(w.english,true);
 }
-function doHint(en,h){document.getElementById('hbtn')?.remove();const el=document.createElement('div');el.className='hint-w';el.style.cssText='padding:0 15px 13px';el.textContent=h;document.getElementById('qarea').appendChild(el);spk(en);}
+function doHint(en,h){
+  document.getElementById('hbtn')?.remove();
+  const el=document.createElement('div');el.className='hint-w';el.style.cssText='padding:0 15px 13px';el.textContent=h;
+  document.getElementById('qarea').appendChild(el);
+  spk(en); // play pronunciation
+  // Add 1 extra question for this word at end of session (treat as not-learned)
+  const curQ=sQuizzes[qIdx];
+  if(curQ){
+    const alreadyHintRetry=sQuizzes.slice(qIdx+1).some(q=>q.wid===curQ.wid&&q.hintRetry);
+    if(!alreadyHintRetry){
+      const t=['viet','listen','choice'][Math.floor(Math.random()*3)];
+      sQuizzes.push({wid:curQ.wid,type:t,retry:false,hintRetry:true});
+      upProg();
+    }
+  }
+}
 function chkChoice(btn,wid,chosen,correct){
   document.querySelectorAll('.ch').forEach(b=>b.disabled=true);
   const ok=chosen===correct;btn.classList.add(ok?'ok':'no');
@@ -1183,8 +1245,13 @@ function showFB(ok,pts,wid,ca){
   const ce=document.getElementById('fb-ca');
   if(ca){ce.classList.remove('hidden');ce.textContent='✏️ Đáp án đúng: '+ca;}else ce.classList.add('hidden');
   if(!ok&&sWrong.includes(wid)){
-    const already=sQuizzes.slice(qIdx+1).some(q=>q.wid===wid&&q.retry);
-    if(!already){sQuizzes.push({wid,type:['choice','listen','viet'][Math.floor(Math.random()*3)],retry:true});}
+    // FIX: add 2 retry questions (different types) instead of 1
+    const existingRetries=sQuizzes.slice(qIdx+1).filter(q=>q.wid===wid&&q.retry).length;
+    const toAdd=Math.max(0,2-existingRetries);
+    const types=shuf(['choice','listen','viet']);
+    for(let ri=0;ri<toAdd;ri++){
+      sQuizzes.push({wid,type:types[ri]||'viet',retry:true});
+    }
   }
   document.getElementById('fb').classList.remove('hidden');upProg();
 }
@@ -1296,7 +1363,26 @@ window.showChangePw=showChangePw; window.savePw=savePw; window.showInstall=showI
 function openM(id){document.getElementById(id).classList.remove('hidden');}
 function closeM(id){document.getElementById(id).classList.add('hidden');}
 function toast(msg){const w=document.getElementById('toast');const el=document.createElement('div');el.className='tpill';el.textContent=msg;w.appendChild(el);setTimeout(()=>el.remove(),2800);}
-function spk(word,silent=false){const s=window.speechSynthesis;if(!s)return;s.cancel();const u=new SpeechSynthesisUtterance(word);u.lang='en-US';u.rate=0.85;s.speak(u);}
+let _bestVoice=null;
+function getBestVoice(){
+  if(_bestVoice)return _bestVoice;
+  const voices=window.speechSynthesis.getVoices();
+  // Priority: Google US English > Microsoft > Apple Samantha > any en-US
+  const priority=['Google US English','Microsoft Aria Online','Microsoft Guy Online','Samantha','Alex','Karen'];
+  for(const name of priority){const v=voices.find(x=>x.name===name);if(v){_bestVoice=v;return v;}}
+  // Fallback: first en-US voice
+  const v=voices.find(x=>x.lang==='en-US')||voices.find(x=>x.lang.startsWith('en'));
+  _bestVoice=v||null;return _bestVoice;
+}
+window.speechSynthesis.onvoiceschanged=()=>{_bestVoice=null;}; // reset cache on voice list change
+function spk(word,silent=false){
+  const s=window.speechSynthesis;if(!s)return;
+  s.cancel();
+  const u=new SpeechSynthesisUtterance(word);
+  u.lang='en-US';u.rate=0.82;u.pitch=1.0;
+  const v=getBestVoice();if(v)u.voice=v;
+  s.speak(u);
+}
 function sim(a,b){a=a.toLowerCase().trim();b=b.toLowerCase().trim();if(a===b)return 1;if(!a||!b)return 0;const dp=Array.from({length:a.length+1},(_,i)=>Array.from({length:b.length+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return 1-dp[a.length][b.length]/Math.max(a.length,b.length);}
 window.openM=openM; window.closeM=closeM; window.toast=toast;
 
