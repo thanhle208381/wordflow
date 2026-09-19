@@ -1082,28 +1082,32 @@ function startSession(did){
 }
 function buildQ(words,noSpk){
   const qs=[];
-  // FIX: First question of every word = 'viet' (look at VN meaning, type EN)
-  // Round 0: all words get 'viet' or 'viet_new' — interleaved in shuffled order
-  const round0Order=shuf([...Array(words.length).keys()]);
-  round0Order.forEach(wi=>{
+  // Rounds per word: viet_new/viet → viet → choice → speak(or listen if noSpk)
+  // = more writing (viet), less listening
+  // Round 0: all words → viet/viet_new (first Q always = look at VN, type EN)
+  shuf([...Array(words.length).keys()]).forEach(wi=>{
     const w=words[wi];
-    qs.push({wid:w.id,type:w.studiedBefore?'viet':'viet_new',retry:false});
+    qs.push({wid:w.id, type:w.studiedBefore?'viet':'viet_new', retry:false});
   });
-  // Remaining rounds: other quiz types shuffled per word
-  const ts=words.map(w=>{
-    if(!w.studiedBefore){return shuf(noSpk?['choice','listen']:['choice','listen','speak']);}
-    return shuf(noSpk?['choice','listen']:['choice','listen','speak']);
+  // Round 1: all words → viet again (2nd write question)
+  shuf([...Array(words.length).keys()]).forEach(wi=>{
+    qs.push({wid:words[wi].id, type:'viet', retry:false});
   });
-  const maxR=Math.max(...ts.map(t=>t.length));
-  for(let r=0;r<maxR;r++){
-    const ord=shuf([...Array(words.length).keys()]);
-    ord.forEach(wi=>{if(ts[wi][r])qs.push({wid:words[wi].id,type:ts[wi][r],retry:false});});
-  }
-  if(noSpk){
-    // Replace speak types & pad to 20
-    for(let i=0;i<qs.length;i++){if(qs[i].type==='speak')qs[i].type=['choice','listen','viet'][i%3];}
-    const alt=['choice','listen','viet'];
-    while(qs.length<20){const wi=qs.length%words.length;qs.push({wid:words[wi].id,type:alt[qs.length%3],retry:false});}
+  // Round 2: all words → choice (multiple choice)
+  shuf([...Array(words.length).keys()]).forEach(wi=>{
+    qs.push({wid:words[wi].id, type:'choice', retry:false});
+  });
+  // Round 3: speak OR listen (if speak skipped)
+  shuf([...Array(words.length).keys()]).forEach(wi=>{
+    qs.push({wid:words[wi].id, type:noSpk?'listen':'speak', retry:false});
+  });
+
+  // Scale minimum questions proportionally: 4 per word minimum
+  const minQ = words.length * 4;
+  const alt=['viet','choice','viet'];
+  while(qs.length < minQ){
+    const wi=qs.length % words.length;
+    qs.push({wid:words[wi].id, type:alt[qs.length%alt.length], retry:false});
   }
   return qs;
 }
@@ -1196,7 +1200,9 @@ function bSpeak(w,a){
 function skipSpk(){
   skipSpkUntil=Date.now()+SKIP_MS;
   for(let i=qIdx;i<sQuizzes.length;i++){if(sQuizzes[i].type==='speak')sQuizzes[i].type=['choice','listen','viet'][i%3];}
-  while(sQuizzes.length<20){const wi=sQuizzes.length%sWords.length;sQuizzes.push({wid:sWords[wi].id,type:['choice','listen','viet'][sQuizzes.length%3],retry:false});}
+  // pad proportionally: min 4 questions per word
+  const minQpad = sWords.length * 4;
+  while(sQuizzes.length<minQpad){const wi=sQuizzes.length%sWords.length;sQuizzes.push({wid:sWords[wi].id,type:['viet','choice','viet'][sQuizzes.length%3],retry:false});}
   toast('⏭ Bỏ qua luyện nói 15 phút');qIdx++;renderQ();
 }
 function togRec(wid,wen){recing?stopRec(wid,wen,''):startRec(wid,wen);}
@@ -1222,7 +1228,11 @@ function procSpk(wid,wen,t){
 }
 function skipQ(){document.getElementById('fb').classList.add('hidden');qIdx++;renderQ();}
 function applyR(wid,pts,correct){
-  sScore+=pts;const res=sResults.find(r=>r.word.id===wid);if(res)res.score+=pts;
+  // Wrong answer: deduct 10 pts (word score can go negative to show multiple mistakes)
+  const delta = correct ? pts : -10;
+  sScore = Math.max(0, sScore + delta); // session total never below 0
+  const res=sResults.find(r=>r.word.id===wid);
+  if(res) res.score += delta; // word score can go negative
   if(!correct&&!sWrong.includes(wid))sWrong.push(wid);
   const w=findWord(wid);
   if(w){
@@ -1239,7 +1249,7 @@ function showFB(ok,pts,wid,ca){
   document.getElementById('fb-em').textContent=ok?'✅':'❌';
   document.getElementById('fb-res').textContent=ok?'Chính xác!':'Chưa đúng!';
   document.getElementById('fb-res').style.color=ok?'var(--green)':'var(--red)';
-  document.getElementById('fb-pts').textContent='+'+pts+' điểm';
+  document.getElementById('fb-pts').textContent=ok?'+'+pts+' điểm':'-10 điểm';
   document.getElementById('fb-w').textContent=w.english;
   document.getElementById('fb-vn').textContent=w.vietnamese;
   const ce=document.getElementById('fb-ca');
@@ -1248,9 +1258,9 @@ function showFB(ok,pts,wid,ca){
     // FIX: add 2 retry questions (different types) instead of 1
     const existingRetries=sQuizzes.slice(qIdx+1).filter(q=>q.wid===wid&&q.retry).length;
     const toAdd=Math.max(0,2-existingRetries);
-    const types=shuf(['choice','listen','viet']);
+    // Retry is always 'viet' (write EN from VN) — best for reinforcement
     for(let ri=0;ri<toAdd;ri++){
-      sQuizzes.push({wid,type:types[ri]||'viet',retry:true});
+      sQuizzes.push({wid, type:'viet', retry:true});
     }
   }
   document.getElementById('fb').classList.remove('hidden');upProg();
@@ -1261,7 +1271,10 @@ function exitLearn(){if(confirm('Thoát phiên học?')){document.getElementById
 async function showDone(){
   document.getElementById('fb').classList.add('hidden');
   stats.totalSessions++;stats.totalPoints+=sScore;await saveStats();
-  const max=sQuizzes.length*25,pct=Math.round((sScore/max)*100);
+  // max = only count non-retry questions for fair percentage
+  const baseQ=sQuizzes.filter(q=>!q.retry&&!q.hintRetry).length;
+  const max=Math.max(baseQ,1)*25;
+  const pct=Math.round((sScore/max)*100);
   const em=pct>=80?'🎉':pct>=50?'👍':'💪';
   document.getElementById('qarea').innerHTML=`
     <div class="done">
@@ -1363,66 +1376,72 @@ window.showChangePw=showChangePw; window.savePw=savePw; window.showInstall=showI
 function openM(id){document.getElementById(id).classList.remove('hidden');}
 function closeM(id){document.getElementById(id).classList.add('hidden');}
 function toast(msg){const w=document.getElementById('toast');const el=document.createElement('div');el.className='tpill';el.textContent=msg;w.appendChild(el);setTimeout(()=>el.remove(),2800);}
-// ── TTS: 3-tier natural voice system ──────────────────
-// Tier 1: Merriam-Webster mp3 (real human, stored in word.audioUrl)
-// Tier 2: StreamElements neural TTS (Amazon Polly — natural AI voice, free)
-// Tier 3: Web Speech API (device fallback)
+// ── TTS: Natural voice system ─────────────────────────
+// Priority 1: stored audioUrl (Merriam-Webster real human mp3)
+// Priority 2: fetch audioUrl on-demand from Free Dictionary API
+// Priority 3: Google Translate TTS (very natural, unofficial, free)
+// Priority 4: Web Speech API (device fallback)
 
-let _ttsAudio = null; // current playing Audio object
+let _ttsAudio = null;
+const _audioCache = {}; // cache fetched audioUrls: word → url|null
 
-function spk(word, silent=false){
-  // Stop any currently playing audio
-  if(_ttsAudio){ _ttsAudio.pause(); _ttsAudio=null; }
+async function spk(word){
+  // Stop any playing audio
+  if(_ttsAudio){ try{_ttsAudio.pause();}catch{} _ttsAudio=null; }
   window.speechSynthesis?.cancel();
 
-  // Find the word object to check for stored audioUrl
-  const wObj = allWords().find(w=>w.english===word);
+  const wordLow = word.toLowerCase().trim();
 
-  // Tier 1: Use stored Merriam-Webster recording if available
+  // Priority 1: stored audioUrl in word object
+  const wObj = allWords().find(w=>w.english===wordLow);
   if(wObj?.audioUrl){
-    _ttsAudio = new Audio(wObj.audioUrl);
-    _ttsAudio.playbackRate = 0.92;
-    _ttsAudio.play().catch(()=> spkStream(word));
-    return;
+    if(await tryPlayAudio(wObj.audioUrl)) return;
   }
-  // Tier 2: StreamElements neural voice (sounds like Amazon Polly)
-  spkStream(word);
+
+  // Priority 2: check cache, then fetch from Free Dictionary API
+  if(_audioCache[wordLow] === undefined){
+    _audioCache[wordLow] = null; // mark as pending
+    try{
+      const r = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(wordLow)}`);
+      if(r.ok){
+        const d = await r.json();
+        const au = d[0]?.phonetics?.find(p=>p.audio)?.audio || null;
+        _audioCache[wordLow] = au;
+        // Also save to word object for future use
+        if(au && wObj){ wObj.audioUrl = au; debounceSave(); }
+      }
+    }catch{}
+  }
+  if(_audioCache[wordLow]){
+    if(await tryPlayAudio(_audioCache[wordLow])) return;
+  }
+
+  // Priority 3: Google Translate TTS (natural voice, free)
+  const gtUrl = `https://translate.googleapis.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(wordLow)}&tl=en&client=gtx&ttsspeed=0.8`;
+  if(await tryPlayAudio(gtUrl)) return;
+
+  // Priority 4: Web Speech API fallback
+  spkFallback(word);
 }
 
-// StreamElements TTS — Matthew (US male, very natural)
-// Fallback voices: Joanna (US female), Joey (US male)
-const SE_VOICES = ['Matthew','Joanna','Joey'];
-let _seVoiceIdx = 0;
-
-function spkStream(word){
-  const voice = SE_VOICES[_seVoiceIdx];
-  const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(word)}`;
-  _ttsAudio = new Audio(url);
-  _ttsAudio.playbackRate = 0.92;
-  _ttsAudio.play().catch(()=>{
-    // If current voice fails, try next voice
-    _seVoiceIdx = (_seVoiceIdx + 1) % SE_VOICES.length;
-    if(_seVoiceIdx !== 0){
-      spkStream(word); // retry with next voice
-    } else {
-      spkFallback(word); // all StreamElements failed → use Web Speech API
-    }
-  });
+async function tryPlayAudio(url){
+  try{
+    const a = new Audio(url);
+    a.playbackRate = 0.9;
+    _ttsAudio = a;
+    await a.play();
+    return true;
+  }catch{ return false; }
 }
 
-// Web Speech API fallback (device TTS)
 function spkFallback(word){
   const s = window.speechSynthesis; if(!s) return;
   s.cancel();
   const u = new SpeechSynthesisUtterance(word);
-  u.lang='en-US'; u.rate=0.85; u.pitch=1.0;
-  // Pick best available voice
+  u.lang='en-US'; u.rate=0.82; u.pitch=1.0;
   const voices = s.getVoices();
-  const priority = ['Google US English','Microsoft Aria Online','Microsoft Guy Online','Samantha','Alex'];
-  for(const name of priority){
-    const v = voices.find(x=>x.name===name);
-    if(v){ u.voice=v; break; }
-  }
+  const priority = ['Google US English','Microsoft Aria Online','Microsoft Guy Online','Samantha','Alex','Karen'];
+  for(const nm of priority){ const v=voices.find(x=>x.name===nm); if(v){u.voice=v;break;} }
   s.speak(u);
 }
 function sim(a,b){a=a.toLowerCase().trim();b=b.toLowerCase().trim();if(a===b)return 1;if(!a||!b)return 0;const dp=Array.from({length:a.length+1},(_,i)=>Array.from({length:b.length+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return 1-dp[a.length][b.length]/Math.max(a.length,b.length);}
