@@ -1383,183 +1383,135 @@ function toast(msg){const w=document.getElementById('toast');const el=document.c
 // Priority 2: fetch audioUrl on-demand from Free Dictionary API
 // Priority 3: Google Translate TTS (very natural, unofficial, free)
 // ═══════════════════════════════════════════════════
-// TTS — 2 sources, no CORS, no delay
-// Source 1: Free Dictionary API mp3 (real human voice)
-// Source 2: Web Speech API (properly async-initialized)
+// TTS — ZERO DELAY design
+// Logic: speak IMMEDIATELY with best available voice,
+//        fetch mp3 URL in background for next time.
 // ═══════════════════════════════════════════════════
 
 let _ttsAudio = null;
-const _audioCache = {}; // word → mp3 URL string | null (null = no audio exists)
-let _voicesReady = false;
+const _audioCache = {}; // word → url string | null | 'fetching'
 let _bestVoice = null;
-
-// Pre-load Web Speech API voices asynchronously at startup
-// Must be called EARLY — voices load async, not available on first getVoices() call
-function initVoices(){
+// Promise that resolves when voices are loaded (or timeout)
+const _voicesReady = new Promise(resolve => {
   const s = window.speechSynthesis;
-  if(!s) return;
-
-  function pickVoice(){
+  if(!s){ resolve(); return; }
+  function pickBest(){
     const voices = s.getVoices();
-    if(!voices.length) return;
-    _voicesReady = true;
-    // Prefer US English neural voices (ordered by quality)
+    if(!voices.length) return false;
     const priority = [
-      'Google US English',        // Chrome desktop — neural quality
+      'Google US English',
       'Microsoft Aria Online (Natural) - English (United States)',
       'Microsoft Guy Online (Natural) - English (United States)',
       'Microsoft Jenny Online (Natural) - English (United States)',
-      'Microsoft Aria - English (United States)',
-      'Samantha',                 // macOS/iOS — very natural
-      'Alex',                     // macOS
-      'Google UK English Female', // fallback Google
-      'Google UK English Male',
+      'Samantha','Alex',
+      'Google UK English Female','Google UK English Male',
     ];
     for(const name of priority){
-      const v = voices.find(x => x.name === name);
-      if(v){ _bestVoice = v; break; }
+      const v = voices.find(x=>x.name===name);
+      if(v){ _bestVoice=v; return true; }
     }
-    // If none matched, take first en-US voice
-    if(!_bestVoice){
-      _bestVoice = voices.find(x => x.lang === 'en-US')
-                || voices.find(x => x.lang.startsWith('en'))
-                || null;
-    }
+    _bestVoice = voices.find(x=>x.lang==='en-US')
+              || voices.find(x=>x.lang.startsWith('en'))
+              || null;
+    return !!_bestVoice;
   }
+  if(pickBest()){ resolve(); return; }
+  s.onvoiceschanged = ()=>{ if(pickBest()) resolve(); };
+  // Fallback: resolve anyway after 2s so app never hangs
+  setTimeout(()=>{ pickBest(); resolve(); }, 2000);
+});
 
-  // Try sync first (Firefox, Safari load immediately)
-  pickVoice();
-  // Then hook async event (Chrome desktop & Android need this)
-  s.onvoiceschanged = pickVoice;
-  // Extra safety: poll for up to 3 seconds on stubborn browsers
-  if(!_voicesReady){
-    let tries = 0;
-    const poll = setInterval(()=>{
-      pickVoice();
-      if(_voicesReady || ++tries > 12) clearInterval(poll);
-    }, 250);
-  }
+// Fix protocol-relative URL  (//) → https://
+function fixAudioUrl(u){ return u?(u.startsWith('//')?'https:'+u:u):null; }
+
+// Fetch mp3 URL in background, cache it, save to word — NON-BLOCKING
+function bgFetchAudio(wordLow){
+  if(_audioCache[wordLow]!==undefined) return; // already have it
+  _audioCache[wordLow]='fetching';
+  fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(wordLow)}`,
+    {signal:AbortSignal.timeout(6000)})
+  .then(r=>r.ok?r.json():null)
+  .then(data=>{
+    let au=null;
+    for(const p of(data?.[0]?.phonetics||[])){
+      if(p.audio){au=fixAudioUrl(p.audio);break;}
+    }
+    _audioCache[wordLow]=au;
+    if(au){
+      const wObj=allWords().find(w=>w.english===wordLow);
+      if(wObj&&!wObj.audioUrl){wObj.audioUrl=au;debounceSave();}
+    }
+  })
+  .catch(()=>{ _audioCache[wordLow]=null; });
 }
-// Pre-fetch audio URLs for up to 30 words that don't have one yet
-// Runs silently in background after login — no UI impact
+
+// Pre-warm: fetch audio URLs for all words in background after login
 async function preWarmAudio(){
-  const words = allWords().filter(w => !w.audioUrl).slice(0, 30);
+  const words=allWords().filter(w=>!w.audioUrl);
   for(const w of words){
-    if(_audioCache[w.english] !== undefined) continue; // already cached
-    try{
-      const r = await fetch(
-        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(w.english)}`,
-        { signal: AbortSignal.timeout(3000) }
-      );
-      if(r.ok){
-        const data = await r.json();
-        let au = null;
-        for(const p of (data[0]?.phonetics || [])){
-          if(p.audio){ au = fixAudioUrl(p.audio); break; }
-        }
-        _audioCache[w.english] = au;
-        if(au){ w.audioUrl = au; }
-      } else { _audioCache[w.english] = null; }
-    }catch{ _audioCache[w.english] = null; }
-    await new Promise(r=>setTimeout(r,120)); // gentle rate limit
+    bgFetchAudio(w.english);
+    await new Promise(r=>setTimeout(r,150)); // stagger requests
   }
-  if(allWords().some(w=>w.audioUrl)) debounceSave(); // save updated audioUrls
 }
 
-initVoices(); // run immediately at script load
-
-// Fix audioUrl: some dictionary API URLs start with "//" (protocol-relative)
-function fixAudioUrl(url){
-  if(!url) return null;
-  if(url.startsWith('//')) return 'https:' + url;
-  return url;
-}
-
-// Main speak function — called everywhere in the app
-async function spk(word){
-  if(!word) return;
-  const wordLow = word.toLowerCase().trim();
-
-  // Stop any currently playing audio immediately (no delay)
-  if(_ttsAudio){ try{_ttsAudio.pause(); _ttsAudio.src='';}catch{} _ttsAudio=null; }
-  window.speechSynthesis?.cancel();
-
-  // ── Source 1: Dictionary API mp3 (human voice) ─────────────
-  // Check word object first (may already have audioUrl from bulk-add)
-  const wObj = allWords().find(w => w.english === wordLow);
-  const storedUrl = fixAudioUrl(wObj?.audioUrl);
-
-  if(storedUrl){
-    // Already have URL — play it directly, no fetch needed
-    if(await playMp3(storedUrl, word)) return;
-  }
-
-  // Not in word object — check cache
-  if(_audioCache[wordLow] === undefined){
-    // First time seeing this word — fetch from dictionary API
-    _audioCache[wordLow] = null; // mark fetching (prevents double-fetch)
+// Play an mp3 URL — true=success, false=failed/not available
+async function playMp3(url){
+  return new Promise(resolve=>{
     try{
-      const r = await fetch(
-        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(wordLow)}`,
-        { signal: AbortSignal.timeout(4000) } // 4s max, then fallback
-      );
-      if(r.ok){
-        const data = await r.json();
-        // Find first non-empty audio URL
-        let au = null;
-        for(const phonetic of (data[0]?.phonetics || [])){
-          if(phonetic.audio){ au = fixAudioUrl(phonetic.audio); break; }
-        }
-        _audioCache[wordLow] = au; // cache result (null if not found)
-        // Save back to word object to avoid future fetches
-        if(au && wObj && !wObj.audioUrl){ wObj.audioUrl = au; debounceSave(); }
-      }
-    }catch(e){
-      // Network error or timeout — skip to Web Speech API immediately
-      _audioCache[wordLow] = null;
-    }
-  }
-
-  // Play cached mp3 if found
-  if(_audioCache[wordLow]){
-    if(await playMp3(_audioCache[wordLow], word)) return;
-  }
-
-  // ── Source 2: Web Speech API (device TTS) ─────────────────
-  spkWebSpeech(word);
-}
-
-// Play an mp3 URL — returns true if successful, false if failed
-async function playMp3(url, word){
-  return new Promise(resolve => {
-    try{
-      const a = new Audio(url);
-      a.playbackRate = 0.9;
-      a.oncanplaythrough = () => {
-        _ttsAudio = a;
-        a.play()
-          .then(() => resolve(true))
-          .catch(() => { _ttsAudio = null; resolve(false); });
-      };
-      a.onerror = () => resolve(false);
-      // Timeout: if audio doesn't load in 3s, give up and use Web Speech
-      setTimeout(() => { if(!_ttsAudio){ a.src=''; resolve(false); } }, 3000);
-      a.load();
+      const a=new Audio(url);
+      a.playbackRate=0.9;
+      _ttsAudio=a;
+      // Timeout 2.5s: if it hasn't started by then, give up
+      const t=setTimeout(()=>{
+        try{a.pause();a.src='';}catch{}
+        _ttsAudio=null; resolve(false);
+      },2500);
+      a.onended=a.onpause=()=>clearTimeout(t);
+      a.onerror=()=>{ clearTimeout(t); _ttsAudio=null; resolve(false); };
+      a.play()
+        .then(()=>{ clearTimeout(t); resolve(true); })
+        .catch(()=>{ clearTimeout(t); _ttsAudio=null; resolve(false); });
     }catch{ resolve(false); }
   });
 }
 
-// Web Speech API — uses pre-loaded best voice
-function spkWebSpeech(word){
-  const s = window.speechSynthesis;
-  if(!s) return;
+// Web Speech API with pre-loaded best voice
+async function spkWebSpeech(word){
+  // Wait for voice selection (usually instant after first call)
+  await Promise.race([_voicesReady, new Promise(r=>setTimeout(r,300))]);
+  const s=window.speechSynthesis; if(!s) return;
   s.cancel();
-  const u = new SpeechSynthesisUtterance(word);
-  u.lang = 'en-US';
-  u.rate = 0.82;
-  u.pitch = 1.0;
-  if(_bestVoice) u.voice = _bestVoice;
+  const u=new SpeechSynthesisUtterance(word);
+  u.lang='en-US'; u.rate=0.82; u.pitch=1.0;
+  if(_bestVoice) u.voice=_bestVoice;
   s.speak(u);
+}
+
+// ── MAIN SPEAK FUNCTION ─────────────────────────────
+// Zero-delay: if mp3 cached → play mp3; else → Web Speech immediately
+// Always triggers background fetch for next time.
+async function spk(word){
+  if(!word) return;
+  const w=word.toLowerCase().trim();
+
+  // Stop whatever is playing right now
+  if(_ttsAudio){try{_ttsAudio.pause();_ttsAudio.src='';}catch{} _ttsAudio=null;}
+  window.speechSynthesis?.cancel();
+
+  // Check if we already have a URL (stored or cached)
+  const wObj=allWords().find(x=>x.english===w);
+  const cachedUrl = fixAudioUrl(wObj?.audioUrl)
+                 || (_audioCache[w]&&_audioCache[w]!=='fetching'?_audioCache[w]:null);
+
+  if(cachedUrl){
+    // URL ready → play mp3, fallback to Web Speech if it fails
+    if(await playMp3(cachedUrl)) return;
+  }
+
+  // No URL cached yet → speak immediately with Web Speech (ZERO delay)
+  // and fetch mp3 URL in background for next time
+  bgFetchAudio(w);
+  await spkWebSpeech(word);
 }
 function sim(a,b){a=a.toLowerCase().trim();b=b.toLowerCase().trim();if(a===b)return 1;if(!a||!b)return 0;const dp=Array.from({length:a.length+1},(_,i)=>Array.from({length:b.length+1},(_,j)=>i?j?0:i:j));for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]:1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);return 1-dp[a.length][b.length]/Math.max(a.length,b.length);}
 window.openM=openM; window.closeM=closeM; window.toast=toast;
