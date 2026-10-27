@@ -1472,6 +1472,9 @@ function getElVoiceId(){
   return _EL_VOICES[v]||_EL_VOICES.Rachel;
 }
 
+// Last ElevenLabs error — shown in test UI
+let _elLastErr = '';
+
 // Call ElevenLabs API and return blob URL; cache result in _elCache
 async function spkElevenLabs(word){
   const key=getElKey(); if(!key) return false;
@@ -1486,9 +1489,12 @@ async function spkElevenLabs(word){
       await new Promise(r=>setTimeout(r,100));
       if(_elCache[w]!=='fetching') break;
     }
-    return _elCache[w]?await playMp3(_elCache[w]):false;
+    return _elCache[w] && _elCache[w]!=='fetching' ? await playMp3(_elCache[w]) : false;
   }
   _elCache[w]='fetching';
+  // Use AbortController (works on all browsers, unlike AbortSignal.timeout)
+  const ctrl=new AbortController();
+  const tid=setTimeout(()=>ctrl.abort(),12000);
   try{
     const res=await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${getElVoiceId()}`,{
       method:'POST',
@@ -1499,14 +1505,17 @@ async function spkElevenLabs(word){
       },
       body:JSON.stringify({
         text:word,
-        model_id:'eleven_monolingual_v1',
-        voice_settings:{stability:0.5,similarity_boost:0.75,style:0.0,use_speaker_boost:true}
+        model_id:'eleven_turbo_v2_5',
+        voice_settings:{stability:0.5,similarity_boost:0.75}
       }),
-      signal:AbortSignal.timeout(10000)
+      signal:ctrl.signal
     });
+    clearTimeout(tid);
     if(!res.ok){
-      const msg=await res.text().catch(()=>'');
-      console.warn('ElevenLabs error',res.status,msg);
+      let errBody='';
+      try{const j=await res.json();errBody=j?.detail?.message||j?.detail||JSON.stringify(j);}catch{errBody=await res.text().catch(()=>'');}
+      _elLastErr=`HTTP ${res.status}: ${String(errBody).slice(0,120)}`;
+      console.warn('ElevenLabs error',_elLastErr);
       _elCache[w]=null; return false;
     }
     const blob=await res.blob();
@@ -1514,7 +1523,9 @@ async function spkElevenLabs(word){
     _elCache[w]=url;
     return await playMp3(url);
   }catch(e){
-    console.warn('ElevenLabs fetch failed',e);
+    clearTimeout(tid);
+    _elLastErr=e.name==='AbortError'?'Timeout (12s)':String(e.message||e).slice(0,120);
+    console.warn('ElevenLabs fetch failed',_elLastErr);
     _elCache[w]=null; return false;
   }
 }
