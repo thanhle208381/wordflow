@@ -1429,15 +1429,21 @@ async function testElVoice(btn){
   localStorage.setItem('el_key',k);
   const st=document.getElementById('el-status');
   if(btn) btn.disabled=true;
-  if(st){st.textContent='⏳ Đang kết nối ElevenLabs...';st.style.color='var(--muted)';}
+  _elLastErr='';
+  if(st){st.textContent='⏳ Đang kết nối ElevenLabs...';st.style.color='var(--muted)';st.style.fontSize='.8rem';}
   delete _elCache['hello'];
   const ok=await spkElevenLabs('hello');
   if(btn) btn.disabled=false;
   if(st){
-    st.textContent=ok?'✅ Giọng AI hoạt động tốt!':'❌ Lỗi — kiểm tra lại API Key';
-    st.style.color=ok?'var(--lime)':'var(--red)';
+    if(ok){
+      st.textContent='✅ Giọng AI hoạt động tốt!';
+      st.style.color='var(--lime)';
+    } else {
+      st.textContent='❌ '+((_elLastErr)||'Lỗi không xác định — mở DevTools (F12) xem Console');
+      st.style.color='var(--red)';
+      st.style.fontSize='.75rem';
+    }
   }
-  if(!ok) toast('❌ Không kết nối được ElevenLabs. Kiểm tra API Key.');
 }
 window.showChangeName=showChangeName; window.saveName=saveName;
 window.showChangePw=showChangePw; window.savePw=savePw; window.showInstall=showInstall;
